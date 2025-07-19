@@ -1,0 +1,13 @@
+body {
+    background: #f9f9fb;
+}
+.card {
+    border-radius: 12px;
+}
+.table th, .table td {
+    vertical-align: middle !important;
+    font-size: 15px;
+}
+.status-success { color: green; font-weight: bold; }
+.status-fail { color: red; font-weight: bold; }
+.status-processing { color: orange; }
