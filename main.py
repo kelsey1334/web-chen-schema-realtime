@@ -1,7 +1,7 @@
 import os
 import pandas as pd
 import requests
-from fastapi import FastAPI, Request, Form, UploadFile, File
+from fastapi import FastAPI, Request, Form, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -13,6 +13,7 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 import io
 import urllib3
+import asyncio
 
 # Disable SSL warnings (not recommended for prod)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -31,6 +32,25 @@ app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+# ====== WebSocket Connection Manager ======
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict = {}
+
+    async def connect(self, websocket: WebSocket, session_id: str):
+        await websocket.accept()
+        self.active_connections[session_id] = websocket
+
+    def disconnect(self, session_id: str):
+        if session_id in self.active_connections:
+            del self.active_connections[session_id]
+
+    async def send_log(self, session_id: str, message: str):
+        ws = self.active_connections.get(session_id)
+        if ws:
+            await ws.send_text(message)
+
+manager = ConnectionManager()
 
 # ====== Helper functions for schema ======
 def read_accounts_and_data(file_path):
@@ -123,7 +143,6 @@ def update_schema(item_id, script_schema, type_, account):
     script_schema = script_schema.strip() if script_schema else ""
     if type_ in ["post", "page"]:
         api_endpoint = f"{account['WP_API_URL']}/wp-json/wp/v2/{type_}s/{item_id}"
-
         if script_schema == "":
             payload = {
                 "meta": {
@@ -148,7 +167,6 @@ def update_schema(item_id, script_schema, type_, account):
                     }
                 }
             }
-
         resp = requests.patch(api_endpoint, json=payload, auth=HTTPBasicAuth(account['WP_USER'], account['WP_APP_PASS']), verify=False)
         if resp.status_code == 200:
             return True, None
@@ -190,55 +208,6 @@ def update_schema(item_id, script_schema, type_, account):
 
     else:
         return False, f"Loại '{type_}' không hỗ trợ"
-
-def process_excel_multi_account(file_path, action="chencode"):
-    logs = []
-    delete_mode = (action == "xoascript")
-    try:
-        accounts_df, data_df = read_accounts_and_data(file_path)
-        accounts_dict = get_account_dict(accounts_df)
-        require_cols = {'url', 'type', 'site'} if delete_mode else {'url', 'script_schema', 'type', 'site'}
-        if not require_cols.issubset(data_df.columns):
-            return [f"File không đúng định dạng. Sheet 'data' phải có cột: {require_cols}"], None
-
-        results = []
-        for idx, row in data_df.iterrows():
-            url = row['url']
-            type_ = row['type'].strip().lower()
-            site = str(row['site']).strip().lower()
-            schema = "" if delete_mode else row.get('script_schema', '')
-            account = accounts_dict.get(site)
-            if not account:
-                msg = f"🚫❌ [{idx+1}] Không tìm thấy tài khoản cho site: {site}"
-                logs.append(msg)
-                results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": "Không tìm thấy tài khoản"})
-                continue
-
-            item_id = get_id_from_url(url, type_, account)
-            if not item_id:
-                msg = f"🚫❌ [{idx+1}] Không tìm thấy ID cho URL: {url} (loại: {type_}, site: {site})"
-                logs.append(msg)
-                results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": "Không tìm thấy ID"})
-                continue
-            ok, detail = update_schema(item_id, schema, type_, account)
-            if ok:
-                action_text = "Xoá" if delete_mode else "Cập nhật"
-                msg = f"✨✅ [{idx+1}] {action_text} schema cho {type_} ID {item_id} thành công (site: {site})"
-                result = "Thành công"
-            else:
-                msg = f"🚫❌ [{idx+1}] Lỗi khi {('xoá' if delete_mode else 'cập nhật')} schema cho {type_} ID {item_id} (site: {site})"
-                result = f"Lỗi: {detail}"
-                logs.append(f"💥⚠️ [{idx+1}] Chi tiết lỗi: {detail}")
-            logs.append(msg)
-            results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": result})
-
-        # Kết quả xuất file Excel
-        df_result = pd.DataFrame(results)
-        out_file = os.path.join(UPLOAD_DIR, f"result_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx")
-        df_result.to_excel(out_file, index=False)
-        return logs, out_file
-    except Exception as e:
-        return [f"🚫❌ Lỗi khi xử lý: {e}"], None
 
 # ========== Helper for CRAWL ==========
 def crawl_url(url):
@@ -293,11 +262,10 @@ def login(request: Request, username: str = Form(...), password: str = Form(...)
         return RedirectResponse("/dashboard", status_code=302)
     return templates.TemplateResponse("login.html", {"request": request, "error": "Sai tài khoản hoặc mật khẩu"})
 
-@app.get("/", response_class=HTMLResponse)
-def home(request: Request):
-    if not request.session.get("user"):
-        return RedirectResponse("/login")
-    return RedirectResponse("/dashboard")
+@app.get("/logout", response_class=HTMLResponse)
+def logout(request: Request):
+    request.session.clear()
+    return RedirectResponse("/login")
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
@@ -305,86 +273,144 @@ def dashboard(request: Request):
         return RedirectResponse("/login")
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
-@app.post("/login", response_class=HTMLResponse)
-def login(request: Request, username: str = Form(...), password: str = Form(...)):
-    if username == USER and password == PASS:
-        request.session["user"] = username
-        return RedirectResponse("/dashboard", status_code=302)
-    return templates.TemplateResponse("login.html", {"request": request, "error": "Sai tài khoản hoặc mật khẩu"})
-
-@app.get("/logout", response_class=HTMLResponse)
-def logout(request: Request):
-    request.session.clear()
-    return RedirectResponse("/login")
-
+# ====== SCHEMA + LOG REALTIME ======
 @app.get("/upload", response_class=HTMLResponse)
 def upload_page(request: Request):
     if not request.session.get("user"):
         return RedirectResponse("/login")
-    return templates.TemplateResponse("upload.html", {"request": request, "logs": None, "file_url": None})
+    # tạo session id (simple)
+    session_id = request.session.get("user") + "_upload"
+    return templates.TemplateResponse("upload.html", {"request": request, "logs": None, "file_url": None, "session_id": session_id})
 
 @app.post("/upload", response_class=HTMLResponse)
 async def do_upload(request: Request, action: str = Form(...), file: UploadFile = File(...)):
     if not request.session.get("user"):
         return RedirectResponse("/login")
+    session_id = request.session.get("user") + "_upload"
     temp_file = os.path.join(UPLOAD_DIR, f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename}")
     with open(temp_file, "wb") as f:
         f.write(await file.read())
-    logs, out_file = process_excel_multi_account(temp_file, action=action)
-    file_url = f"/static/{os.path.basename(out_file)}" if out_file else None
-    # Copy file to static dir for download
-    if out_file:
-        import shutil
-        shutil.copy(out_file, os.path.join(STATIC_DIR, os.path.basename(out_file)))
-    return templates.TemplateResponse(
-        "upload.html", {"request": request, "logs": logs, "file_url": file_url}
-    )
+    logs, out_file = [], None
 
+    async def process_and_send():
+        nonlocal logs, out_file
+        try:
+            accounts_df, data_df = read_accounts_and_data(temp_file)
+            accounts_dict = get_account_dict(accounts_df)
+            delete_mode = (action == "xoascript")
+            require_cols = {'url', 'type', 'site'} if delete_mode else {'url', 'script_schema', 'type', 'site'}
+            if not require_cols.issubset(data_df.columns):
+                await manager.send_log(session_id, f"Lỗi: Sheet 'data' phải có cột {require_cols}")
+                return
+            results = []
+            for idx, row in data_df.iterrows():
+                url = row['url']
+                type_ = row['type'].strip().lower()
+                site = str(row['site']).strip().lower()
+                schema = "" if delete_mode else row.get('script_schema', '')
+                account = accounts_dict.get(site)
+                if not account:
+                    msg = f"🚫❌ [{idx+1}] Không tìm thấy tài khoản cho site: {site}"
+                    await manager.send_log(session_id, msg)
+                    results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": "Không tìm thấy tài khoản"})
+                    continue
+                item_id = get_id_from_url(url, type_, account)
+                if not item_id:
+                    msg = f"🚫❌ [{idx+1}] Không tìm thấy ID cho URL: {url} (loại: {type_}, site: {site})"
+                    await manager.send_log(session_id, msg)
+                    results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": "Không tìm thấy ID"})
+                    continue
+                ok, detail = update_schema(item_id, schema, type_, account)
+                if ok:
+                    action_text = "Xoá" if delete_mode else "Cập nhật"
+                    msg = f"✨✅ [{idx+1}] {action_text} schema cho {type_} ID {item_id} thành công (site: {site})"
+                    result = "Thành công"
+                else:
+                    msg = f"🚫❌ [{idx+1}] Lỗi khi {('xoá' if delete_mode else 'cập nhật')} schema cho {type_} ID {item_id} (site: {site})"
+                    result = f"Lỗi: {detail}"
+                    await manager.send_log(session_id, f"💥⚠️ [{idx+1}] Chi tiết lỗi: {detail}")
+                await manager.send_log(session_id, msg)
+                results.append({"stt": idx+1, "url": url, "site": site, "type": type_, "result": result})
+                await asyncio.sleep(0.1)
+            df_result = pd.DataFrame(results)
+            out_file = os.path.join(UPLOAD_DIR, f"result_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx")
+            df_result.to_excel(out_file, index=False)
+            if out_file:
+                import shutil
+                shutil.copy(out_file, os.path.join(STATIC_DIR, os.path.basename(out_file)))
+            await manager.send_log(session_id, "DONE")
+        except Exception as e:
+            await manager.send_log(session_id, f"Lỗi khi xử lý: {e}")
+
+    asyncio.create_task(process_and_send())
+    file_url = None  # Tải xong sẽ có link download ở UI
+    return templates.TemplateResponse("upload.html", {"request": request, "logs": None, "file_url": file_url, "session_id": session_id})
+
+@app.websocket("/ws-upload/{session_id}")
+async def websocket_upload(websocket: WebSocket, session_id: str):
+    await manager.connect(websocket, session_id)
+    try:
+        while True:
+            await websocket.receive_text()  # chỉ giữ connection
+    except WebSocketDisconnect:
+        manager.disconnect(session_id)
+
+# ========== CRAWL + LOG REALTIME ==========
 @app.get("/crawl", response_class=HTMLResponse)
 def crawl_page(request: Request):
     if not request.session.get("user"):
         return RedirectResponse("/login")
-    return templates.TemplateResponse("crawl.html", {"request": request, "result": None, "file_url": None, "error": None})
+    session_id = request.session.get("user") + "_crawl"
+    return templates.TemplateResponse("crawl.html", {"request": request, "result": None, "file_url": None, "error": None, "session_id": session_id})
 
 @app.post("/crawl", response_class=HTMLResponse)
 async def do_crawl(request: Request, file: UploadFile = File(...)):
     if not request.session.get("user"):
         return RedirectResponse("/login")
-    try:
-        df = pd.read_excel(io.BytesIO(await file.read()))
-        if "URL" not in df.columns:
-            return templates.TemplateResponse(
-                "crawl.html", {"request": request, "result": None, "file_url": None, "error": "File phải có cột tên 'URL'!"}
-            )
-        urls = df["URL"].dropna().tolist()
-        result = []
-        for url in urls:
-            data = crawl_url(str(url).strip())
-            result.append(data)
-        result_df = pd.DataFrame(result)
-        output = io.BytesIO()
-        result_df.to_excel(output, index=False)
-        output.seek(0)
-        # Lưu file để có link download
-        save_name = f"crawl_result_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
-        out_path = os.path.join(STATIC_DIR, save_name)
-        with open(out_path, "wb") as f:
-            f.write(output.read())
-        output.seek(0)
-        return templates.TemplateResponse(
-            "crawl.html", {
-                "request": request,
-                "result": result,
-                "file_url": f"/static/{save_name}",
-                "error": None
-            }
-        )
-    except Exception as e:
-        return templates.TemplateResponse(
-            "crawl.html", {"request": request, "result": None, "file_url": None, "error": f"Lỗi: {e}"}
-        )
+    session_id = request.session.get("user") + "_crawl"
+    temp_file = os.path.join(UPLOAD_DIR, f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{file.filename}")
+    with open(temp_file, "wb") as f:
+        f.write(await file.read())
 
-# Run with: uvicorn main:app --host 0.0.0.0 --port 8080
+    async def process_and_send():
+        try:
+            df = pd.read_excel(temp_file)
+            if "URL" not in df.columns:
+                await manager.send_log(session_id, "File phải có cột tên 'URL'!")
+                return
+            urls = df["URL"].dropna().tolist()
+            result = []
+            for idx, url in enumerate(urls, 1):
+                data = crawl_url(str(url).strip())
+                result.append(data)
+                await manager.send_log(session_id, f"Đã crawl {idx}/{len(urls)}: {url}")
+                await asyncio.sleep(0.1)
+            result_df = pd.DataFrame(result)
+            output = io.BytesIO()
+            result_df.to_excel(output, index=False)
+            output.seek(0)
+            save_name = f"crawl_result_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+            out_path = os.path.join(STATIC_DIR, save_name)
+            with open(out_path, "wb") as f:
+                f.write(output.read())
+            await manager.send_log(session_id, "DONE:" + save_name)
+        except Exception as e:
+            await manager.send_log(session_id, f"Lỗi: {e}")
+
+    asyncio.create_task(process_and_send())
+    return templates.TemplateResponse("crawl.html", {"request": request, "result": None, "file_url": None, "error": None, "session_id": session_id})
+
+@app.websocket("/ws-crawl/{session_id}")
+async def websocket_crawl(websocket: WebSocket, session_id: str):
+    await manager.connect(websocket, session_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(session_id)
+
+# ======================
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8080)
