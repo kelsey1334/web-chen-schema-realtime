@@ -1,41 +1,51 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Crawl Tool</title>
-    <link href="/static/style.css" rel="stylesheet">
-    <script>
-        let ws;
-        function startWS() {
-            ws = new WebSocket("{{'wss://' if request.url.scheme=='https' else 'ws://'}}" + window.location.host + "/ws-crawl/{{ session_id }}");
-            ws.onmessage = function(event) {
-                let logArea = document.getElementById("logs");
-                if(event.data.startsWith("DONE:")) {
-                    let fname = event.data.split("DONE:")[1].trim();
-                    document.getElementById("download-link").innerHTML = '<a href="/static/' + fname + '" target="_blank">Tải kết quả Excel</a>';
-                } else {
-                    logArea.value += event.data + "\n";
-                    logArea.scrollTop = logArea.scrollHeight;
-                }
-            }
-        }
-        window.onload = startWS;
-    </script>
+    <title>Crawl URL Realtime</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        body {font-family:sans-serif; background:#f6f7fb;}
+        .container {max-width:540px; margin:40px auto; background:#fff; border-radius:8px; box-shadow:0 2px 12px #0001; padding:32px;}
+        h2 {color:#2563eb;}
+        #log-box {height:200px;overflow:auto;border:1px solid #ddd;margin-top:10px;background:#f8f8f8;padding:8px;border-radius:4px;}
+        button {background:#2563eb;color:#fff;border:none;padding:10px 28px;font-size:16px;border-radius:6px;cursor:pointer;margin-top:10px;}
+        button:hover {background:#194ca2;}
+        #download {margin-top:16px;}
+        .back {margin-bottom:18px; display:inline-block;}
+        .back a {color:#194ca2; text-decoration:underline;}
+    </style>
 </head>
 <body>
-<div class="top-bar">
-    <a href="/dashboard">Dashboard</a>
-    <a href="/upload">Thêm/Xoá Schema</a>
-    <a href="/crawl">Crawl dữ liệu</a>
-    <a href="/logout" class="logout">Logout</a>
-</div>
-<div class="content">
-    <h2>Crawl dữ liệu từ URL</h2>
-    <form method="post" action="/crawl" enctype="multipart/form-data">
-        <input type="file" name="file" required>
+<div class="container">
+    <div class="back"><a href="/dashboard">&larr; Quay về Dashboard</a></div>
+    <h2>Crawl URL (Realtime Log)</h2>
+    <form method="post" enctype="multipart/form-data">
+        <input type="file" name="file" accept=".xlsx" required>
         <button type="submit">Bắt đầu crawl</button>
     </form>
-    <textarea id="logs" rows="15" style="width:100%;margin-top:12px" readonly></textarea>
-    <div id="download-link" style="margin-top:12px"></div>
+    <div id="log-box"></div>
+    <div id="download"></div>
+    {% if error %}
+      <div style="color:#d32f2f;">{{ error }}</div>
+    {% endif %}
 </div>
+<script>
+let ws = null;
+function startWS() {
+    const sessionId = "{{ session_id }}";
+    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws-crawl/" + sessionId);
+    ws.onmessage = function(event) {
+        let logBox = document.getElementById('log-box');
+        if (event.data.startsWith("DONE:")) {
+            let file = event.data.replace("DONE:","");
+            document.getElementById("download").innerHTML = `<a href='/static/${file}' target='_blank'>Tải kết quả</a>`;
+        } else {
+            logBox.innerHTML += event.data + "<br>";
+            logBox.scrollTop = logBox.scrollHeight;
+        }
+    }
+}
+startWS();
+</script>
 </body>
 </html>
