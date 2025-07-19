@@ -1,0 +1,54 @@
+body {
+    background: #f7fafc;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    margin: 0;
+}
+.center-card, .content {
+    background: #fff;
+    margin: 60px auto 0 auto;
+    padding: 32px 24px;
+    border-radius: 18px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.10);
+    max-width: 420px;
+}
+.top-bar {
+    background: #294768;
+    color: #fff;
+    padding: 14px 40px;
+    font-size: 18px;
+}
+.top-bar a {
+    color: #fff;
+    margin-right: 28px;
+    text-decoration: none;
+    font-weight: 500;
+}
+.top-bar .logout {
+    float: right;
+    color: #ff8787;
+}
+h2 { margin: 10px 0 20px 0; }
+input[type="text"], input[type="password"], input[type="file"], select {
+    padding: 8px;
+    margin: 10px 0 15px 0;
+    width: 100%;
+    box-sizing: border-box;
+    border-radius: 6px;
+    border: 1px solid #d0d7de;
+}
+button {
+    background: #1976d2;
+    color: #fff;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+}
+button:hover { background: #135aa1; }
+textarea { font-size: 15px; }
+.error { color: #e43d3d; margin-top: 10px;}
+#download-link a {
+    color: #1d7c36;
+    font-weight: bold;
+}
